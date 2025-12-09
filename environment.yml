@@ -1,0 +1,6 @@
+name: IIS
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+prefix: C:\Users\Zhuoer\anaconda3\envs\IIS
