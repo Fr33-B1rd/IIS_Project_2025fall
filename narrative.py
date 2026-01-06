@@ -2,7 +2,9 @@
 from google import genai
 from google.genai import types
 import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 class NarrativeEngine:
     """
@@ -105,3 +107,6 @@ class NarrativeEngine:
         elif self.current_state == "COMBAT":
             self.current_state = "EPILOGUE"
         # else: keep EPILOGUE as an end state for now
+
+if __name__ == '__main__':
+    narrative = NarrativeEngine()

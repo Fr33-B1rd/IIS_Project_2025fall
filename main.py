@@ -15,6 +15,76 @@ from furhat_realtime_api import FurhatClient
 
 from perception import EmotionDetector
 from narrative import NarrativeEngine
+import threading, time
+
+class EmotionWorker:
+    def __init__(self, detector, update_hz=10.0):
+        self.detector = detector
+        self.period = 1.0 / max(1.0, float(update_hz))
+        self.latest_emotion = "confused"
+        self.latest_frame = None
+
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._t.start()
+
+    def stop(self):
+        self._stop.set()
+        self._t.join(timeout=2.0)
+
+    def _run(self):
+        while not self._stop.is_set():
+            emo, frame = self.detector.get_emotion(return_frame=True)
+            with self._lock:
+                self.latest_emotion = emo
+                self.latest_frame = frame
+            time.sleep(self.period)
+
+    def get_latest(self):
+        with self._lock:
+            return self.latest_emotion, self.latest_frame
+
+# Run in a separate thread
+class PreviewWorker:
+    def __init__(self, emotion_worker, window_name="EmotionPerception (Smoothed)", update_hz=20.0):
+        self.emotion_worker = emotion_worker
+        self.window_name = window_name
+        self.period = 1.0 / max(1.0, float(update_hz))
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._t.start()
+
+    def stop(self):
+        self._stop.set()
+        self._t.join(timeout=2.0)
+        try:
+            cv2.destroyWindow(self.window_name)
+        except Exception:
+            pass
+
+    def _run(self):
+        while not self._stop.is_set():
+            emo, frame = self.emotion_worker.get_latest()
+            if frame is not None:
+                vis = frame.copy()
+                cv2.putText(
+                    vis, f"{emo}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA
+                )
+                cv2.imshow(self.window_name, vis)
+
+            # needed for UI refresh
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                self._stop.set()
+                break
+
+            time.sleep(self.period)
 
 
 def run_application(
@@ -50,6 +120,11 @@ def run_application(
             camera_index=0,
             frames_per_call=5,
         )
+        emotion_worker = EmotionWorker(eyes, update_hz=10.0)
+        emotion_worker.start()
+
+        preview_worker = PreviewWorker(emotion_worker)
+        preview_worker.start()
     except Exception as e:
         print(f"[CRITICAL] Could not start EmotionDetector: {e}")
         furhat.disconnect()
@@ -72,29 +147,29 @@ def run_application(
     try:
         while True:
             # A. PERCEPTION: get emotional state + preview frame
-            current_emotion, preview_frame = eyes.get_emotion(return_frame=True)
+            current_emotion, preview_frame = emotion_worker.get_latest() #eyes.get_emotion(return_frame=True)
             print(f"[Perception] User emotion: {current_emotion}")
 
             # Show preview frame if available
-            if preview_frame is not None:
-                vis = preview_frame.copy()
-                cv2.putText(
-                    vis,
-                    f"{current_emotion}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 255, 0),
-                    2,
-                    cv2.LINE_AA,
-                )
-                cv2.imshow("EmotionPerception (Smoothed)", vis)
-
-                # This keeps the window responsive; it won't auto-close
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    # Optional: allow quitting the whole app via 'q'
-                    print("[MAIN] 'q' pressed in preview window, exiting.")
-                    break
+            # if preview_frame is not None:
+            #     vis = preview_frame.copy()
+            #     cv2.putText(
+            #         vis,
+            #         f"{current_emotion}",
+            #         (10, 30),
+            #         cv2.FONT_HERSHEY_SIMPLEX,
+            #         1.0,
+            #         (0, 255, 0),
+            #         2,
+            #         cv2.LINE_AA,
+            #     )
+            #     cv2.imshow("EmotionPerception (Smoothed)", vis)
+            #
+            #     # This keeps the window responsive; it won't auto-close
+            #     if cv2.waitKey(1) & 0xFF == ord("q"):
+            #         # Optional: allow quitting the whole app via 'q'
+            #         print("[MAIN] 'q' pressed in preview window, exiting.")
+            #         break
 
             # B. LISTENING: ASR via Realtime API (blocking until user speaks or timeout)
             print("[Furhat] Listening...")
@@ -161,6 +236,16 @@ def run_application(
             time.sleep(0.3)
 
     finally:
+        try:
+            emotion_worker.stop()
+        except Exception:
+            pass
+
+        try:
+            preview_worker.stop()
+        except Exception:
+            pass
+
         try:
             eyes.close()
         except Exception:
