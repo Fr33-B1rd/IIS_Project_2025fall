@@ -27,7 +27,6 @@ from visualization import EmotionVisualizer
 def run_application(
     robot_ip: str = "127.0.0.1",
     api_key: Optional[str] = None,
-    test_mode: bool = False,
     show_ui: bool = True,
 ):
     # 1) Connect to Furhat
@@ -44,11 +43,11 @@ def run_application(
     # 2) Init modules (keep args compatible with your current perception.py signature)
     try:
         eyes = EmotionDetector(
-            model_path="dinov3_svm_3class.joblib",
+            model_path="dinov3_svm_3class_mydata.joblib",
             camera_index=0,
             frames_per_call=5,
-            pmax_threshold=0.45,
-            margin_threshold=0.10,
+            pmax_threshold=0.55,
+            margin_threshold=0.15,
         )
     except Exception as e:
         print(f"[CRITICAL] Could not start EmotionDetector: {e}")
@@ -58,13 +57,12 @@ def run_application(
             pass
         return
 
-    brain = NarrativeEngine(test_mode=test_mode)
+    brain = NarrativeEngine()
     meter = EmotionMeter()
     story = StoryManager(script_path="A_Distressed_Damsel.PDF")
 
-    mode_str = "TEST MODE" if test_mode else "NORMAL DM MODE"
     print("--- Emotion-Adaptive Dungeon Master (Realtime API) ---")
-    print(f"--- Running in {mode_str} ---")
+    print("--- Running in NORMAL DM MODE ---")
 
     # Visualization state (optional)
     viz = None
@@ -77,6 +75,9 @@ def run_application(
         "strategy": "Waiting for emotion update...",
         "deep_help": False,
     }
+    last_emo_label = "uncertain"
+    last_emo_probs = {}
+    last_decision = None
 
     def _extract_visual_state(decision_obj) -> Tuple[str, str, dict, bool]:
         if hasattr(decision_obj, "dominant"):
@@ -91,6 +92,17 @@ def run_application(
         if isinstance(decision_obj, str):
             return decision_obj, "low", {}, False
         return "uncertain", "low", {}, False
+
+    def _update_hud_from_decision(decision_obj) -> None:
+        label, level, meters_map, deep_help = _extract_visual_state(decision_obj)
+        strategy = brain._strategy_for_emotion(label, level=level, deep_help_mode=deep_help)
+        with viz_lock:
+            viz_state["label"] = label
+            viz_state["level"] = level
+            if meters_map:
+                viz_state["meters"] = meters_map
+            viz_state["strategy"] = f"I sense the user is {label} ({level}). {strategy}"
+            viz_state["deep_help"] = deep_help
 
     def _viz_loop():
         if viz is None:
@@ -114,24 +126,40 @@ def run_application(
         if viz is not None:
             viz.close()
 
+    viz_thread = None
     if show_ui:
         try:
             viz = EmotionVisualizer()
-            threading.Thread(target=_viz_loop, daemon=True).start()
+            viz_thread = threading.Thread(target=_viz_loop, daemon=True)
+            viz_thread.start()
         except Exception as e:
             print(f"[WARNING] Could not start visualization UI: {e}")
             viz = None
 
     # 3) Story-specific opening (prevents generic hallucinations)
     try:
-        if test_mode:
-            greeting = "This is emotion test mode. Ask: what's my emotion right now, and how should you react?"
-        else:
-            greeting = (
-                "As you travel, someone crashes through the woods: a barefoot woman, torn and bloody, pleading, "
-                "Please help me—my son is missing!"
-            )
+        greeting = (
+            "Hello adventurer. I'm your Dungeon Master for this journey. "
+            "Are you ready to begin our adventure?"
+        )
+        try:
+            eyes.start_buffering(fps=8.0, max_frames=80)
+        except Exception:
+            pass
         furhat.request_speak_text(greeting, wait=True, abort=True)
+        try:
+            last_emo_label, last_emo_probs = eyes.get_emotion_from_buffer()
+        except Exception:
+            try:
+                last_emo_label, last_emo_probs = eyes.get_emotion_snapshot()
+            except Exception:
+                last_emo_label, last_emo_probs = "uncertain", {}
+        print(f"[Perception] User emotion (during listening): {(last_emo_label, last_emo_probs)}")
+        try:
+            last_decision = meter.update(prob_dict=last_emo_probs, label=last_emo_label)
+            _update_hud_from_decision(last_decision)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[WARNING] Failed to speak greeting: {e}")
 
@@ -139,12 +167,6 @@ def run_application(
         while True:
             # A) Listen (capture emotion DURING listening)
             print("[Furhat] Listening...")
-            try:
-                eyes.start_buffering(fps=8.0, max_frames=80)
-            except Exception:
-                # buffering is optional; if it fails we still listen
-                pass
-
             try:
                 user_text = furhat.request_listen_start(
                     partial=False,
@@ -160,45 +182,73 @@ def run_application(
                 print(f"[WARNING] Listening failed: {e}")
                 user_text = ""
 
-            # Stop buffering and compute emotion from the buffered frames
-            try:
-                emo_label, emo_probs = eyes.get_emotion_from_buffer()
-            except Exception:
-                # fallback to snapshot
-                try:
-                    emo_label, emo_probs = eyes.get_emotion_snapshot()
-                except Exception:
-                    emo_label, emo_probs = "uncertain", {}
-
             user_text = (user_text or "").strip()
             print(f"[User] {user_text}")
-            print(f"[Perception] User emotion: {(emo_label, emo_probs)}")
 
             if not user_text:
+                try:
+                    eyes.start_buffering(fps=8.0, max_frames=80)
+                except Exception:
+                    pass
                 furhat.request_speak_text(
                     "I did not quite catch that. Could you say it again?",
                     wait=True,
                     abort=True,
                 )
+                try:
+                    last_emo_label, last_emo_probs = eyes.get_emotion_from_buffer()
+                except Exception:
+                    try:
+                        last_emo_label, last_emo_probs = eyes.get_emotion_snapshot()
+                    except Exception:
+                        last_emo_label, last_emo_probs = "uncertain", {}
+                print(f"[Perception] User emotion (during listening): {(last_emo_label, last_emo_probs)}")
+                try:
+                    last_decision = meter.update(prob_dict=last_emo_probs, label=last_emo_label)
+                    _update_hud_from_decision(last_decision)
+                except Exception:
+                    pass
                 continue
 
             lowered = user_text.lower()
             if any(w in lowered for w in ["quit", "exit", "stop game", "stop"]):
+                try:
+                    eyes.start_buffering(fps=8.0, max_frames=80)
+                except Exception:
+                    pass
                 furhat.request_speak_text("Our story ends here, for now. Farewell.", wait=True, abort=True)
+                try:
+                    last_emo_label, last_emo_probs = eyes.get_emotion_from_buffer()
+                except Exception:
+                    try:
+                        last_emo_label, last_emo_probs = eyes.get_emotion_snapshot()
+                    except Exception:
+                        last_emo_label, last_emo_probs = "uncertain", {}
+                print(f"[Perception] User emotion (during listening): {(last_emo_label, last_emo_probs)}")
+                try:
+                    last_decision = meter.update(prob_dict=last_emo_probs, label=last_emo_label)
+                    _update_hud_from_decision(last_decision)
+                except Exception:
+                    pass
                 break
 
             try:
                 meter.apply_user_recovery(user_text)
-                decision = meter.update(prob_dict=emo_probs, label=emo_label)
+                decision = last_decision or (last_emo_label, last_emo_probs)
             except Exception:
-                decision = (emo_label, emo_probs)
+                decision = (last_emo_label, last_emo_probs)
 
             # B) Story context + DM response
-            story_ctx = story.get_context(user_text)
+            dm_controls = brain.get_dm_controls(decision)
+            story_ctx = story.get_context(user_text, dm_controls=dm_controls)
             response_text, response_gesture = brain.generate_response(
                 user_text, decision, story_context=story_ctx
             )
             print(f"[DM] Text: {response_text} | Gesture: {response_gesture}")
+            try:
+                story.record_turn(user_text, response_text)
+            except Exception:
+                pass
 
             # C) Act
             try:
@@ -213,7 +263,24 @@ def run_application(
                 print(f"[Warning] Could not trigger gesture {response_gesture}: {e}")
 
             try:
+                try:
+                    eyes.start_buffering(fps=8.0, max_frames=80)
+                except Exception:
+                    pass
                 furhat.request_speak_text(response_text, wait=True, abort=True)
+                try:
+                    last_emo_label, last_emo_probs = eyes.get_emotion_from_buffer()
+                except Exception:
+                    try:
+                        last_emo_label, last_emo_probs = eyes.get_emotion_snapshot()
+                    except Exception:
+                        last_emo_label, last_emo_probs = "uncertain", {}
+                print(f"[Perception] User emotion (during listening): {(last_emo_label, last_emo_probs)}")
+                try:
+                    last_decision = meter.update(prob_dict=last_emo_probs, label=last_emo_label)
+                    _update_hud_from_decision(last_decision)
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"[Warning] Could not speak text: {e}")
 
@@ -248,6 +315,11 @@ def run_application(
         except Exception:
             pass
         try:
+            if viz_thread is not None:
+                viz_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
             furhat.disconnect()
         except Exception:
             pass
@@ -255,4 +327,4 @@ def run_application(
 
 
 if __name__ == "__main__":
-    run_application(robot_ip="127.0.0.1", test_mode=False)
+    run_application(robot_ip="127.0.0.1")

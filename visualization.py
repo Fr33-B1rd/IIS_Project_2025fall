@@ -17,7 +17,7 @@ class EmotionVisualizer:
     def __init__(
         self,
         window_name: str = "Emotion HUD",
-        cam_size: tuple = (480, 360),
+        cam_size: tuple = (520, 360),
         meter_size: tuple = (360, 360),
         text_height: int = 140,
     ):
@@ -56,12 +56,18 @@ class EmotionVisualizer:
         center = (self.meter_w // 2, self.meter_h // 2)
         radius = int(min(self.meter_w, self.meter_h) * 0.35)
         font = cv2.FONT_HERSHEY_SIMPLEX
+        tiers = [0.33, 0.66, 1.0]
+        tier_colors = [(60, 60, 60), (90, 90, 90), (120, 120, 120)]
 
         axes = {
             "nervous": -90,
             "excited": 30,
             "confused": 150,
         }
+
+        # Draw tier rings for low/medium/high
+        for t, color in zip(tiers, tier_colors):
+            cv2.circle(panel, center, int(radius * t), color, 1)
 
         # Axes and labels
         for label, deg in axes.items():
@@ -73,11 +79,17 @@ class EmotionVisualizer:
             ly = int(center[1] + (radius + 20) * np.sin(rad))
             cv2.putText(panel, label, (lx - 20, ly), font, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
 
-        # Polygon for current meter values
+        # Polygon for tiered meter values (low/medium/high)
         pts = []
         for label, deg in axes.items():
             v = float(meters.get(label, 0.0))
             v = 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
+            if v < 0.30:
+                v = 0.33
+            elif v < 0.60:
+                v = 0.66
+            else:
+                v = 1.0
             rad = np.deg2rad(deg)
             x = int(center[0] + radius * v * np.cos(rad))
             y = int(center[1] + radius * v * np.sin(rad))
@@ -165,5 +177,7 @@ class EmotionVisualizer:
     def close(self) -> None:
         try:
             cv2.destroyWindow(self.window_name)
+            cv2.destroyAllWindows()
+            cv2.waitKey(1)
         except Exception:
             pass

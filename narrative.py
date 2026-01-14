@@ -9,10 +9,9 @@ from google.genai import types
 class NarrativeEngine:
     """Gemini-based Dungeon Master (emotion-adaptive, story-grounded)."""
 
-    def __init__(self, test_mode: bool = False):
+    def __init__(self):
         self.client = None
-        self.model_name = "gemini-3.0-flash"
-        self.test_mode = test_mode
+        self.model_name = "gemini-3-flash-preview"
 
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
@@ -56,6 +55,8 @@ class NarrativeEngine:
                 "Because you seem confused, I should explain more clearly, repeat key info, "
                 "and offer hints."
             )
+        if emotion_lower == "neutral":
+            return "Because you seem neutral, I should keep a steady pace, balanced detail, and normal-risk choices."
         return "I'm not fully sure, so I should respond neutrally and check if you need clarification."
 
     def _gesture_for_emotion(self, emotion_lower: str) -> str:
@@ -63,6 +64,8 @@ class NarrativeEngine:
             return "Surprise"
         if emotion_lower == "nervous":
             return "ExpressSad"
+        if emotion_lower == "neutral":
+            return "Nod"
         return "Nod"
 
     @staticmethod
@@ -105,7 +108,7 @@ class NarrativeEngine:
 
         emotion_lower = (label or "").strip().lower()
         if not emotion_lower:
-            emotion_lower = "confused"
+            emotion_lower = "neutral"
         return emotion_lower, probs, cues, level, deep_help_mode
 
     @staticmethod
@@ -128,7 +131,49 @@ class NarrativeEngine:
             if level == "medium":
                 return "Player is confused: clarify, summarize options, ask a simple next-step question."
             return "Player is slightly confused: clarify and offer a hint."
+        if emotion_lower == "neutral":
+            return "Player is neutral: steady pacing, balanced detail, normal risk."
         return "Neutral fantasy narration."
+
+    @staticmethod
+    def _controls_for_emotion(emotion_lower: str, level: str, deep_help_mode: bool) -> Dict[str, str]:
+        if emotion_lower == "excited":
+            density = "high" if level in ("medium", "high") else "medium"
+            risk = "high" if level == "high" else "normal"
+            pace = "fast" if level in ("medium", "high") else "normal"
+            options = "3"
+        elif emotion_lower == "nervous":
+            density = "low"
+            risk = "safe"
+            pace = "slow"
+            options = "2"
+        elif emotion_lower == "confused":
+            density = "low"
+            risk = "safe"
+            pace = "slow"
+            options = "2"
+        else:
+            density = "medium"
+            risk = "normal"
+            pace = "normal"
+            options = "2"
+
+        if deep_help_mode:
+            density = "low"
+            pace = "slow"
+            options = "2"
+
+        if level == "high" and emotion_lower in ("nervous", "confused"):
+            density = "low"
+            pace = "slow"
+            options = "2"
+
+        return {"density": density, "risk": risk, "pace": pace, "options": options}
+
+    def get_dm_controls(self, emotion: Any) -> Dict[str, str]:
+        emotion_lower, _, _, level, deep_help_mode = self._normalize_emotion(emotion)
+        level = (level or "low").strip().lower()
+        return self._controls_for_emotion(emotion_lower, level=level, deep_help_mode=deep_help_mode)
 
     @staticmethod
     def _format_story_block(story_context: Any) -> str:
@@ -139,15 +184,39 @@ class NarrativeEngine:
             beat_summary = getattr(story_context, "beat_summary", None) or story_context.get("beat_summary")
             passages = getattr(story_context, "retrieved_passages", None) or story_context.get("retrieved_passages", [])
             beat_id = getattr(story_context, "beat_id", None) or story_context.get("beat_id")
+            recent_turns = getattr(story_context, "recent_turns", None) or story_context.get("recent_turns", [])
+            beat_details = getattr(story_context, "beat_details", None) or story_context.get("beat_details", [])
+            risk_cues = getattr(story_context, "risk_cues", None) or story_context.get("risk_cues", [])
+            dm_controls = getattr(story_context, "dm_controls", None) or story_context.get("dm_controls", {})
             if passages:
                 joined = "\n".join([f"- {p}" for p in passages])
             else:
                 joined = "- (no passages retrieved)"
+            if recent_turns:
+                recent_joined = "\n".join([f"- Player: {u}\n  DM: {d}" for u, d in recent_turns])
+            else:
+                recent_joined = "- (no recent turns)"
+            if beat_details:
+                details_joined = "\n".join([f"- {d}" for d in beat_details])
+            else:
+                details_joined = "- (no details)"
+            if risk_cues:
+                risk_joined = "\n".join([f"- {r}" for r in risk_cues])
+            else:
+                risk_joined = "- (no risk cues)"
+            if dm_controls:
+                controls_joined = ", ".join([f"{k}={v}" for k, v in dm_controls.items()])
+            else:
+                controls_joined = "(none)"
             return (
                 f"[Beat ID]: {beat_id}\n"
                 f"[Beat Title]: {beat_title}\n"
                 f"[Beat Summary]: {beat_summary}\n"
                 f"[Canon Passages]:\n{joined}\n"
+                f"[Beat Details]:\n{details_joined}\n"
+                f"[Risk Cues]:\n{risk_joined}\n"
+                f"[DM Controls]: {controls_joined}\n"
+                f"[Recent Turns]:\n{recent_joined}\n"
             )
         except Exception:
             return ""
@@ -155,16 +224,6 @@ class NarrativeEngine:
     def generate_response(self, user_input: str, emotion: Any, story_context: Any = None) -> Tuple[str, str]:
         emotion_lower, _, _, level, deep_help_mode = self._normalize_emotion(emotion)
         level = (level or "low").strip().lower()
-
-        # TEST MODE
-        if self.test_mode:
-            tl = (user_input or "").lower()
-            if ("what" in tl and "emotion" in tl) or ("how should you react" in tl) or ("how would you react" in tl):
-                return (
-                    f"I currently detect your emotion as {emotion_lower} ({level}). "
-                    f"{self._strategy_for_emotion(emotion_lower, level=level, deep_help_mode=deep_help_mode)}",
-                    self._gesture_for_emotion(emotion_lower),
-                )
 
         # Offline fallback
         if self.client is None:
@@ -181,8 +240,12 @@ class NarrativeEngine:
             "CRITICAL RULES:\n"
             "1) Use ONLY the provided Canon Passages + Beat Summary as story truth.\n"
             "2) Do NOT invent new locations, monsters, puzzles, or plotlines.\n"
+            "   You MAY add brief sensory details and tone that are consistent with canon.\n"
             "3) If the player says something generic (e.g., 'let's start'), narrate the CURRENT beat.\n"
-            "4) Keep output to 1–2 short sentences, plain text.\n"
+            "4) Keep output to 2-4 short sentences, plain text.\n"
+            "5) Always include a question or a clear choice that invites the player to act.\n"
+            "6) Only repeat or recap when the player asks for clarification or help.\n"
+            "7) Follow DM Controls: density controls how many new details are added; risk controls how bold choices are; pace controls sentence count and urgency.\n"
         )
 
         style_guide = self._style_for_emotion(emotion_lower, level=level, deep_help_mode=deep_help_mode)
@@ -195,6 +258,8 @@ class NarrativeEngine:
             f"[Style]: {style_guide}\n"
             f"Player said: \"{user_input}\"\n"
             "Respond as DM for the CURRENT beat. If the player asks what to do, give 2-3 concrete options.\n"
+            "If the player is confused at level=high, ask whether they want help or a hint before giving a recap.\n"
+            "Use Beat Details as optional sensory texture according to density; use Risk Cues to set consequence tone.\n"
             "Remember: no invented content outside canon.\n"
         )
 

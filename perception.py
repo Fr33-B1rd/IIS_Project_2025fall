@@ -16,7 +16,7 @@ Model:
 - 3-class SVM (excited / nervous / confused)
 
 Requires:
-  - dinov3_svm_3class.joblib
+  - dinov3_svm_3class_mydata.joblib
 """
 
 from __future__ import annotations
@@ -31,6 +31,10 @@ import numpy as np
 import cv2
 import joblib
 from transformers import AutoImageProcessor, AutoModel
+try:
+    import mediapipe as mp  # type: ignore
+except Exception:
+    mp = None
 
 
 # ----------------------------
@@ -49,16 +53,18 @@ class CaptureConfig:
 class EmotionPerception:
     def __init__(
         self,
-        model_path: str = "dinov3_svm_3class.joblib",
+        model_path: str = "dinov3_svm_3class_mydata.joblib",
         pretrained_model_name: str = "facebook/dinov3-vits16plus-pretrain-lvd1689m",
-        face_margin: float = 0.35,
+        face_margin: float = 0.15,
         bbox_ema_alpha: float = 0.35,
         input_size: int = 224,
+        prob_temperature: float = 1.2,
     ):
         self.model_path = str(model_path)
         self.face_margin = float(face_margin)
         self.bbox_ema_alpha = float(bbox_ema_alpha)
         self.input_size = int(input_size)
+        self.prob_temperature = float(prob_temperature)
 
         # bbox EMA state (x, y, w, h)
         self._bbox_ema: Optional[np.ndarray] = None
@@ -81,10 +87,44 @@ class EmotionPerception:
         self.model.eval()
 
         print("[EmotionPerception] Classes:", list(self.label_encoder.classes_))
+        self._mp_face = None
+        if mp is not None:
+            try:
+                self._mp_face = mp.solutions.face_detection.FaceDetection(
+                    model_selection=0, min_detection_confidence=0.5
+                )
+            except Exception:
+                self._mp_face = None
 
     # ---------- ROI ----------
     def _detect_face_bbox(self, img_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """Return (x, y, w, h) for the largest detected face, or None."""
+        if self._mp_face is not None:
+            h, w = img_bgr.shape[:2]
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            results = self._mp_face.process(img_rgb)
+            if results and results.detections:
+                best = None
+                best_conf = 0.0
+                for det in results.detections:
+                    conf = float(det.score[0]) if det.score else 0.0
+                    if conf < 0.5:
+                        continue
+                    bbox = det.location_data.relative_bounding_box
+                    x0 = int(bbox.xmin * w)
+                    y0 = int(bbox.ymin * h)
+                    bw = int(bbox.width * w)
+                    bh = int(bbox.height * h)
+                    x0 = max(0, x0)
+                    y0 = max(0, y0)
+                    bw = max(1, min(w - x0, bw))
+                    bh = max(1, min(h - y0, bh))
+                    if conf > best_conf:
+                        best_conf = conf
+                        best = (x0, y0, bw, bh)
+                if best is not None:
+                    return best
+
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         faces = _FACE_CASCADE.detectMultiScale(
             gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
@@ -128,13 +168,13 @@ class EmotionPerception:
         return img_bgr[y0:y0 + s, x0:x0 + s]
 
     # ---------- Features ----------
-    def _extract_feature(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def _extract_feature(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
         bbox = self._detect_face_bbox(frame_bgr)
         if bbox is not None:
             bbox = self._ema_bbox(bbox)
             img_bgr = self._crop_face_with_margin(frame_bgr, bbox)
         else:
-            img_bgr = self._center_crop_square(frame_bgr)
+            return None
 
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         img_rgb = cv2.resize(img_rgb, (self.input_size, self.input_size), interpolation=cv2.INTER_AREA)
@@ -159,7 +199,10 @@ class EmotionPerception:
 
     def predict_frame(self, frame_bgr: np.ndarray) -> Dict[str, float]:
         """Return per-class probabilities for one frame (no temporal smoothing)."""
-        feat = self._extract_feature(frame_bgr).reshape(1, -1)
+        feat = self._extract_feature(frame_bgr)
+        if feat is None:
+            raise ValueError("No face detected.")
+        feat = feat.reshape(1, -1)
 
         if hasattr(self.svm, "predict_proba"):
             probs = self.svm.predict_proba(feat)[0]
@@ -168,6 +211,10 @@ class EmotionPerception:
             exps = np.exp(raw - np.max(raw))
             probs = exps / np.sum(exps)
 
+        probs = np.asarray(probs, dtype=np.float32)
+        if self.prob_temperature > 1e-6 and self.prob_temperature != 1.0:
+            probs = np.power(probs, 1.0 / self.prob_temperature)
+            probs = probs / np.sum(probs)
         prob_dict = {cls: float(p) for cls, p in zip(self.label_encoder.classes_, probs)}
         return prob_dict
 
@@ -211,7 +258,7 @@ class EmotionDetector:
 
     def __init__(
         self,
-        model_path: str = "dinov3_svm_3class.joblib",
+        model_path: str = "dinov3_svm_3class_mydata.joblib",
         camera_index: int = 0,
         frames_per_call: int = 5,
         pmax_threshold: float = 0.45,

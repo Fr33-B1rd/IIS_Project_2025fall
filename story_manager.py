@@ -88,6 +88,10 @@ class StoryBeat:
     title: str
     summary: str
     keywords: List[str] = field(default_factory=list)
+    details: List[str] = field(default_factory=list)
+    risk_low: List[str] = field(default_factory=list)
+    risk_mid: List[str] = field(default_factory=list)
+    risk_high: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -97,6 +101,10 @@ class StoryContext:
     beat_summary: str
     retrieved_passages: List[str]
     flags: Dict[str, bool]
+    recent_turns: List[Tuple[str, str]]
+    beat_details: List[str]
+    risk_cues: List[str]
+    dm_controls: Dict[str, str]
 
 
 class StoryManager:
@@ -112,11 +120,13 @@ class StoryManager:
         *,
         max_chunks: int = 3,
         max_chars_per_chunk: int = 800,
+        max_recent_turns: int = 6,
         use_time: bool = True,
     ):
         self.script_path = Path(script_path)
         self.max_chunks = max_chunks
         self.max_chars_per_chunk = max_chars_per_chunk
+        self.max_recent_turns = max_recent_turns
         self.use_time = use_time
 
         self.raw_text: str = ""
@@ -129,6 +139,7 @@ class StoryManager:
         self.current_beat_index: int = 0
         self.flags: Dict[str, bool] = {}
         self.last_turn_ts: float = time.time()
+        self.recent_turns: List[Tuple[str, str]] = []
 
         # Beats tuned for "A Distressed Damsel" (micro-adventure pacing)
         self.beats: List[StoryBeat] = [
@@ -137,36 +148,120 @@ class StoryManager:
                 "A desperate woman appears on the road",
                 "A distraught woman, Layla, rushes from the woods pleading for help finding her missing son. She claims slavers attacked her family and a beast scattered the camp.",
                 ["layla", "son", "slavers", "woods", "track", "help"],
+                details=[
+                    "Layla's clothes are torn and muddy, her breath shallow.",
+                    "Fresh branches snap in the woods where she emerged.",
+                    "Her eyes dart to the treeline as if expecting pursuit.",
+                ],
+                risk_low=[
+                    "The road feels quiet; no immediate threat presses in.",
+                ],
+                risk_mid=[
+                    "A faint rustle suggests someone or something may be nearby.",
+                ],
+                risk_high=[
+                    "A sharp crack from the treeline hints danger could be close.",
+                ],
             ),
             StoryBeat(
                 "camp",
                 "The abandoned camp in a clearing",
-                "The party can track to a clearing with an abandoned camp—broken crates and a wagon—suggesting something is off. A trail leads deeper into the woods.",
+                "The party can track to a clearing with an abandoned camp-broken crates and a wagon-suggesting something is off. A trail leads deeper into the woods.",
                 ["camp", "clearing", "wagon", "crates", "trail", "survival"],
+                details=[
+                    "The wagon sits skewed, one wheel splintered.",
+                    "Crates are broken open, their contents gone.",
+                    "Ashes in a cold firepit crumble at a touch.",
+                ],
+                risk_low=[
+                    "The clearing is still, with no sign of movement.",
+                ],
+                risk_mid=[
+                    "A faint, uneven track suggests haste and struggle.",
+                ],
+                risk_high=[
+                    "The trail grows sharper and more frantic deeper into the woods.",
+                ],
             ),
             StoryBeat(
                 "cave_approach",
                 "A cave mouth and a child's shoe",
                 "Following the trail leads to a cave. Layla grows increasingly nervous. A child's shoe near the entrance raises the stakes.",
                 ["cave", "shoe", "entrance", "nervous", "search"],
+                details=[
+                    "A small shoe lies half-buried in damp leaves.",
+                    "Cool air seeps from the cave mouth.",
+                    "Layla clutches her cloak tighter as you approach.",
+                ],
+                risk_low=[
+                    "The cave entrance is silent, no movement inside.",
+                ],
+                risk_mid=[
+                    "A faint drip echoes from within, obscuring other sounds.",
+                ],
+                risk_high=[
+                    "Shallow claw marks scar the stone near the entrance.",
+                ],
             ),
             StoryBeat(
                 "cave_trap",
                 "Inside the cave: trap and split passage",
                 "Inside, the cave narrows. There is a spiked pit trap deeper in. The passage ends in a T-intersection: left or right.",
                 ["trap", "pit", "spikes", "t", "left", "right", "listen"],
+                details=[
+                    "The tunnel walls tighten, forcing single file.",
+                    "A sudden draft brushes past, carrying a stale scent.",
+                    "The floor changes texture where the pit lies hidden.",
+                ],
+                risk_low=[
+                    "The air is still, and the path seems safe for now.",
+                ],
+                risk_mid=[
+                    "Loose gravel hints the ground may not be stable.",
+                ],
+                risk_high=[
+                    "A misstep here could trigger the pit trap.",
+                ],
             ),
             StoryBeat(
                 "reveal",
                 "The 'boy' and the werewolf ambush",
-                "A boy sits calmly at a table—then the trap springs: werewolves ambush from behind and Layla reveals her true nature.",
+                "A boy sits calmly at a table-then the trap springs: werewolves ambush from behind and Layla reveals her true nature.",
                 ["boy", "mother", "hungry", "werewolf", "ambush", "hybrid"],
+                details=[
+                    "The boy's gaze is steady, almost too calm.",
+                    "A heavy silence hangs before the sudden attack.",
+                    "Layla's posture shifts, predatory and cold.",
+                ],
+                risk_low=[
+                    "You sense tension building but no immediate strike yet.",
+                ],
+                risk_mid=[
+                    "A low growl rolls from the shadows behind you.",
+                ],
+                risk_high=[
+                    "The ambush snaps shut with claws and teeth from the dark.",
+                ],
             ),
             StoryBeat(
                 "aftermath",
                 "Aftermath and clues",
                 "After the conflict, the party finds treasure and a ledger hinting at a broader criminal network. The ledger can connect to ongoing plots.",
                 ["treasure", "ledger", "trade", "clues", "plot"],
+                details=[
+                    "A battered chest sits half-buried under hides.",
+                    "The ledger is stained, pages stuck at the corners.",
+                    "Coins glint faintly in the low light.",
+                ],
+                risk_low=[
+                    "The cave settles into a wary quiet.",
+                ],
+                risk_mid=[
+                    "Distant echoes suggest others could return.",
+                ],
+                risk_high=[
+                    "Fresh tracks imply the threat may not be over.",
+                ],
             ),
         ]
 
@@ -275,7 +370,36 @@ class StoryManager:
 
     # ------------------- public API -------------------
 
-    def get_context(self, user_text: str, *, extra_query: str = "") -> StoryContext:
+    def _pick_from_pool(self, pool: List[str], count: int) -> List[str]:
+        if not pool or count <= 0:
+            return []
+        start = 0
+        if pool:
+            start = len(self.recent_turns) % len(pool)
+        picked = []
+        for i in range(min(count, len(pool))):
+            picked.append(pool[(start + i) % len(pool)])
+        return picked
+
+    def _details_for_density(self, beat: StoryBeat, density: str) -> List[str]:
+        if density == "high":
+            count = 3
+        elif density == "medium":
+            count = 2
+        else:
+            count = 1
+        return self._pick_from_pool(beat.details, count)
+
+    def _risk_for_level(self, beat: StoryBeat, risk: str) -> List[str]:
+        if risk == "high":
+            pool = beat.risk_high
+        elif risk == "normal":
+            pool = beat.risk_mid
+        else:
+            pool = beat.risk_low
+        return self._pick_from_pool(pool, 1)
+
+    def get_context(self, user_text: str, *, extra_query: str = "", dm_controls: Optional[Dict[str, str]] = None) -> StoryContext:
         """
         Returns a small story context bundle to inject into the LLM prompt.
         """
@@ -287,13 +411,42 @@ class StoryManager:
 
         retrieved = self._retrieve(query, beat_bias=beat, k=self.max_chunks)
 
+        controls = dict(dm_controls or {})
+        density = controls.get("density", "medium")
+        risk = controls.get("risk", "normal")
+        beat_details = self._details_for_density(beat, density)
+        risk_cues = self._risk_for_level(beat, risk)
+
         return StoryContext(
             beat_id=beat.beat_id,
             beat_title=beat.title,
             beat_summary=beat.summary,
             retrieved_passages=retrieved,
             flags=dict(self.flags),
+            recent_turns=list(self.recent_turns),
+            beat_details=beat_details,
+            risk_cues=risk_cues,
+            dm_controls=controls,
         )
+
+    @staticmethod
+    def _sanitize_turn_text(text: str, limit: int = 240) -> str:
+        t = _normalize_ws(text or "")
+        if len(t) <= limit:
+            return t
+        return t[: limit - 3].rstrip() + "..."
+
+    def record_turn(self, user_text: str, dm_text: str) -> None:
+        """
+        Store recent dialogue turns to provide short-term memory to the LLM.
+        """
+        user_clean = self._sanitize_turn_text(user_text)
+        dm_clean = self._sanitize_turn_text(dm_text)
+        if not user_clean and not dm_clean:
+            return
+        self.recent_turns.append((user_clean, dm_clean))
+        if len(self.recent_turns) > self.max_recent_turns:
+            self.recent_turns = self.recent_turns[-self.max_recent_turns :]
 
     def set_flag(self, key: str, value: bool = True) -> None:
         self.flags[key] = bool(value)
@@ -302,3 +455,4 @@ class StoryManager:
         self.current_beat_index = 0
         self.flags = {}
         self.last_turn_ts = time.time()
+        self.recent_turns = []

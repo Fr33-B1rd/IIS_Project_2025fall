@@ -20,7 +20,7 @@ import math
 import time
 
 
-EmotionName = str  # "excited" | "nervous" | "confused" | "uncertain" | "mixed"
+EmotionName = str  # "excited" | "nervous" | "confused" | "neutral" | "uncertain" | "mixed"
 
 
 @dataclass
@@ -51,7 +51,7 @@ class EmotionMeter:
 
     def __init__(
         self,
-        emotions: Tuple[EmotionName, ...] = ("excited", "nervous", "confused"),
+        emotions: Tuple[EmotionName, ...] = ("excited", "nervous", "confused", "neutral"),
         # decay model: M(t) = M0 * exp(-lambda * dt)
         half_life_sec: float = 18.0,
         gain: float = 0.22,  # reinforcement magnitude (per update, scaled by probs)
@@ -176,24 +176,35 @@ class EmotionMeter:
         if now is None:
             now = time.time()
 
-        # 1) decay
-        self._apply_time_decay(now)
-
-        # 2) reinforcement from probs
+        # 1) normalize probs first (used to decide decay behavior)
         probs = self._normalize_probs(prob_dict or {}, self.emotions)
-        for e in self.emotions:
-            self.meters[e] = self._clamp01(self.meters[e] + self.gain * probs.get(e, 0.0))
 
-        # 3) determine uncertainty from raw probs (not meters)
-        # Note: probs already normalized over 3 classes
+        # 2) decay (only when dominant emotion is not continuing confidently)
         p_sorted = sorted((probs[e], e) for e in self.emotions)
         pmax, emax = p_sorted[-1]
         p2 = p_sorted[-2][0] if len(p_sorted) >= 2 else 0.0
         prob_margin = float(pmax - p2)
+        continuing = False
+        if (
+            self.last_decision is not None
+            and self.last_decision.dominant == emax
+            and emax in self.emotions
+            and pmax >= self.pmax_threshold
+            and prob_margin >= self.prob_margin_threshold
+        ):
+            continuing = True
+        if not continuing:
+            self._apply_time_decay(now)
 
+        # 3) reinforcement from probs
+        for e in self.emotions:
+            self.meters[e] = self._clamp01(self.meters[e] + self.gain * probs.get(e, 0.0))
+
+        # 4) determine uncertainty from raw probs (not meters)
+        # Note: probs already normalized over classes
         uncertain = (pmax < self.pmax_threshold) or (prob_margin < self.prob_margin_threshold)
 
-        # 4) determine dominant from meters + margin gate
+        # 5) determine dominant from meters + margin gate
         m_sorted = sorted((self.meters[e], e) for e in self.emotions)
         mmax, m_emax = m_sorted[-1]
         m2 = m_sorted[-2][0] if len(m_sorted) >= 2 else 0.0
@@ -204,7 +215,7 @@ class EmotionMeter:
         # candidate dominant (pre-hysteresis)
         candidate = "uncertain" if uncertain else ("mixed" if mixed else m_emax)
 
-        # 5) hysteresis switching
+        # 6) hysteresis switching
         if candidate in ("mixed", "uncertain"):
             self._dominant = candidate
             self._switch_candidate = None
@@ -238,7 +249,7 @@ class EmotionMeter:
                 self._switch_candidate = None
                 self._switch_count = 0
 
-        # 6) confusion streak for deep-help
+        # 7) confusion streak for deep-help
         hard_label = (label or "").strip().lower() if label else ""
         if hard_label == "confused":
             self._confused_streak += 1
@@ -250,7 +261,7 @@ class EmotionMeter:
             self._confused_streak >= self.confused_streak_updates
         )
 
-        # 7) level from dominant meter (for mixed/uncertain use max meter)
+        # 8) level from dominant meter (for mixed/uncertain use max meter)
         if self._dominant in self.emotions:
             level = self._tier(self.meters[self._dominant])
         else:
