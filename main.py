@@ -43,7 +43,7 @@ def run_application(
     # 2) Init modules (keep args compatible with your current perception.py signature)
     try:
         eyes = EmotionDetector(
-            model_path="dinov3_svm_3class_mydata.joblib",
+            model_path="dinov3_svm_3class.joblib",
             camera_index=0,
             frames_per_call=5,
             pmax_threshold=0.55,

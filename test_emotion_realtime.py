@@ -16,7 +16,7 @@ from perception import EmotionDetector
 
 def main():
     detector = EmotionDetector(
-        model_path="dinov3_svm_3class_mydata.joblib",
+        model_path="dinov3_svm_3class.joblib",
         camera_index=0,
         frames_per_call=5,
         pmax_threshold=0.55,

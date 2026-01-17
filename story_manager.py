@@ -21,10 +21,6 @@ import math
 import time
 
 
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return lo if x < lo else hi if x > hi else x
-
-
 def _normalize_ws(s: str) -> str:
     s = s.replace("\u00ad", "")  # soft hyphen
     s = re.sub(r"[ \t]+", " ", s)
@@ -121,13 +117,11 @@ class StoryManager:
         max_chunks: int = 3,
         max_chars_per_chunk: int = 800,
         max_recent_turns: int = 6,
-        use_time: bool = True,
     ):
         self.script_path = Path(script_path)
         self.max_chunks = max_chunks
         self.max_chars_per_chunk = max_chars_per_chunk
         self.max_recent_turns = max_recent_turns
-        self.use_time = use_time
 
         self.raw_text: str = ""
         self.chunks: List[str] = []

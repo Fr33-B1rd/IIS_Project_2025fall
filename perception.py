@@ -16,7 +16,7 @@ Model:
 - 3-class SVM (excited / nervous / confused)
 
 Requires:
-  - dinov3_svm_3class_mydata.joblib
+  - dinov3_svm_3class.joblib
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class CaptureConfig:
 class EmotionPerception:
     def __init__(
         self,
-        model_path: str = "dinov3_svm_3class_mydata.joblib",
+        model_path: str = "dinov3_svm_3class.joblib",
         pretrained_model_name: str = "facebook/dinov3-vits16plus-pretrain-lvd1689m",
         face_margin: float = 0.15,
         bbox_ema_alpha: float = 0.35,
@@ -258,7 +258,7 @@ class EmotionDetector:
 
     def __init__(
         self,
-        model_path: str = "dinov3_svm_3class_mydata.joblib",
+        model_path: str = "dinov3_svm_3class.joblib",
         camera_index: int = 0,
         frames_per_call: int = 5,
         pmax_threshold: float = 0.45,
